@@ -19,8 +19,9 @@
 epub2silero.py - озвучка книги EPUB голосами Silero TTS напрямую, без SAPI5.
 
 Запуск через uv (сам поставит Python, torch и ffmpeg в отдельное окружение):
+    uv run epub2silero.py книга.epub                    (аудио - в books/книга рядом со скриптом)
     uv run epub2silero.py книга.epub папка_для_аудио
-    uv run epub2silero.py книга.epub папка_для_аудио --list   (только показать главы)
+    uv run epub2silero.py книга.epub --list             (только показать главы)
 
 Модель Silero скачивается при первом запуске (один файл рядом со скриптом).
 Прерванную озвучку можно продолжить той же командой: готовые главы пропускаются.
@@ -31,7 +32,7 @@ epub2silero.py - озвучка книги EPUB голосами Silero TTS на
 
 # --- Модель и голос ---
 MODEL_URL = "https://models.silero.ai/models/tts/ru/v5_5_ru.pt"
-MODEL_FILE = ""          # путь к файлу модели; "" = рядом со скриптом
+MODEL_FILE = "aidar"          # путь к файлу модели; "" = рядом со скриптом
 SPEAKER = "xenia"        # aidar, baya, kseniya, xenia, eugene
 SAMPLE_RATE = 48000      # 8000, 24000 или 48000
 DEVICE = "cpu"           # "cpu" или "cuda"
@@ -736,7 +737,8 @@ def main():
             stream.reconfigure(errors="replace")   # редкие символы в названиях не уронят вывод
     arguments = argparse.ArgumentParser(description="EPUB -> аудиокнига голосами Silero TTS")
     arguments.add_argument("book", help="файл книги .epub")
-    arguments.add_argument("out_dir", help="папка для аудиофайлов")
+    arguments.add_argument("out_dir", nargs="?",
+                           help="папка для аудиофайлов (по умолчанию books/<имя файла книги> рядом со скриптом)")
     arguments.add_argument("--list", action="store_true", help="показать главы и выйти")
     args = arguments.parse_args()
 
@@ -768,7 +770,7 @@ def main():
     if OUTPUT_FORMAT != "wav" and not find_ffmpeg():
         sys.exit(f"Не найден ffmpeg. Запускайте скрипт через uv run, укажите путь в FFMPEG "
                  f"или поставьте OUTPUT_FORMAT = \"wav\".")
-    out_dir = Path(args.out_dir)
+    out_dir = Path(args.out_dir) if args.out_dir else Path(__file__).resolve().parent / "books" / Path(args.book).stem
     out_dir.mkdir(parents=True, exist_ok=True)
     model = None
     audio_total, started = 0.0, time.time()
