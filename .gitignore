@@ -80,5 +80,5 @@ dmypy.json
 
 # Downloaded model weights
 models/
-books/
+audiobooks/
 epub/

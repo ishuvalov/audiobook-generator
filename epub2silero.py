@@ -19,11 +19,11 @@
 epub2silero.py - озвучка книги EPUB голосами Silero TTS напрямую, без SAPI5.
 
 Запуск через uv (сам поставит Python, torch и ffmpeg в отдельное окружение):
-    uv run epub2silero.py книга.epub                    (аудио - в books/книга рядом со скриптом)
+    uv run epub2silero.py книга.epub                    (аудио - в audiobooks/книга рядом со скриптом)
     uv run epub2silero.py книга.epub папка_для_аудио
     uv run epub2silero.py книга.epub --list             (только показать главы)
 
-Модель Silero скачивается при первом запуске (один файл рядом со скриптом).
+Модель Silero скачивается при первом запуске (один файл в папке models рядом со скриптом).
 Прерванную озвучку можно продолжить той же командой: готовые главы пропускаются.
 Все настройки - константы ниже.
 """
@@ -32,8 +32,8 @@ epub2silero.py - озвучка книги EPUB голосами Silero TTS на
 
 # --- Модель и голос ---
 MODEL_URL = "https://models.silero.ai/models/tts/ru/v5_5_ru.pt"
-MODEL_FILE = "aidar"          # путь к файлу модели; "" = рядом со скриптом
-SPEAKER = "xenia"        # aidar, baya, kseniya, xenia, eugene
+MODEL_FILE = ""          # путь к файлу модели; "" = в папке models рядом со скриптом
+SPEAKER = "aidar"        # aidar, baya, kseniya, xenia, eugene
 SAMPLE_RATE = 48000      # 8000, 24000 или 48000
 DEVICE = "cpu"           # "cpu" или "cuda"
 NUM_THREADS = 4          # потоки процессора; больше 4-6 обычно не ускоряет
@@ -601,8 +601,10 @@ def load_model():
     global DASH, torch
     import torch
 
-    path = Path(MODEL_FILE) if MODEL_FILE else Path(__file__).resolve().parent / posixpath.basename(MODEL_URL)
+    path = (Path(MODEL_FILE) if MODEL_FILE
+            else Path(__file__).resolve().parent / "models" / posixpath.basename(MODEL_URL))
     if not path.is_file():
+        path.parent.mkdir(parents=True, exist_ok=True)
         print(f"Скачиваю модель в {path} ...")
         partial = path.with_name(path.name + ".download")
         try:
@@ -738,7 +740,7 @@ def main():
     arguments = argparse.ArgumentParser(description="EPUB -> аудиокнига голосами Silero TTS")
     arguments.add_argument("book", help="файл книги .epub")
     arguments.add_argument("out_dir", nargs="?",
-                           help="папка для аудиофайлов (по умолчанию books/<имя файла книги> рядом со скриптом)")
+                           help="папка для аудиофайлов (по умолчанию audiobooks/<имя файла книги> рядом со скриптом)")
     arguments.add_argument("--list", action="store_true", help="показать главы и выйти")
     args = arguments.parse_args()
 
@@ -770,7 +772,7 @@ def main():
     if OUTPUT_FORMAT != "wav" and not find_ffmpeg():
         sys.exit(f"Не найден ffmpeg. Запускайте скрипт через uv run, укажите путь в FFMPEG "
                  f"или поставьте OUTPUT_FORMAT = \"wav\".")
-    out_dir = Path(args.out_dir) if args.out_dir else Path(__file__).resolve().parent / "books" / Path(args.book).stem
+    out_dir = Path(args.out_dir) if args.out_dir else Path(__file__).resolve().parent / "audiobooks" / Path(args.book).stem
     out_dir.mkdir(parents=True, exist_ok=True)
     model = None
     audio_total, started = 0.0, time.time()
