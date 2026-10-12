@@ -89,6 +89,7 @@ import subprocess
 import sys
 import time
 import unicodedata
+import warnings
 import wave
 import xml.etree.ElementTree as ET
 import zipfile
@@ -615,6 +616,8 @@ def load_model():
         partial.replace(path)
 
     torch.set_num_threads(NUM_THREADS)
+    # Код внутри файла модели написан небрежно, и Python 3.12+ ругается на него при загрузке.
+    warnings.filterwarnings("ignore", category=SyntaxWarning, message="invalid escape sequence")
     # Файл открываем сами и не закрываем: так torch не спотыкается о русские буквы в пути.
     model = torch.package.PackageImporter(open(path, "rb")).load_pickle("tts_models", "model")
     model.to(torch.device(DEVICE))
