@@ -33,7 +33,7 @@ epub2silero.py - озвучка книги EPUB голосами Silero TTS на
 # --- Модель и голос ---
 MODEL_URL = "https://models.silero.ai/models/tts/ru/v5_5_ru.pt"
 MODEL_FILE = ""          # путь к файлу модели; "" = в папке models рядом со скриптом
-SPEAKER = "aidar"        # aidar, baya, kseniya, xenia, eugene
+SPEAKER = "eugene"        # aidar, baya, kseniya, xenia, eugene
 SAMPLE_RATE = 48000      # 8000, 24000 или 48000
 DEVICE = "cpu"           # "cpu" или "cuda"
 NUM_THREADS = 4          # потоки процессора; больше 4-6 обычно не ускоряет
