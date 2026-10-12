@@ -1,13 +1,27 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+# /// script
+# requires-python = ">=3.10,<3.14"
+# dependencies = ["torch>=2.0", "numpy", "imageio-ffmpeg"]
+#
+# [tool.uv]
+# # На Linux torch с PyPI тянет библиотеки CUDA на несколько гигабайт, поэтому там
+# # берём версию для процессора. На Windows и macOS PyPI и так даёт версию для процессора.
+# # Для видеокарты NVIDIA: замените в url "cpu" на "cu128" и удалите marker.
+# sources = { torch = [{ index = "pytorch", marker = "sys_platform == 'linux'" }] }
+#
+# [[tool.uv.index]]
+# name = "pytorch"
+# url = "https://download.pytorch.org/whl/cpu"
+# explicit = true
+# ///
 """
 epub2silero.py - озвучка книги EPUB голосами Silero TTS напрямую, без SAPI5.
 
-Запуск:
-    python epub2silero.py книга.epub папка_для_аудио
-    python epub2silero.py книга.epub папка_для_аудио --list   (только показать главы)
+Запуск через uv (сам поставит Python, torch и ffmpeg в отдельное окружение):
+    uv run epub2silero.py книга.epub папка_для_аудио
+    uv run epub2silero.py книга.epub папка_для_аудио --list   (только показать главы)
 
-Нужно: Python 3.9+ и пакет torch (pip install torch). Для mp3/m4a - ffmpeg.
 Модель Silero скачивается при первом запуске (один файл рядом со скриптом).
 Прерванную озвучку можно продолжить той же командой: готовые главы пропускаются.
 Все настройки - константы ниже.
@@ -30,7 +44,7 @@ TTS_OPTIONS = dict(put_accent=True, put_yo=True,
 # --- Выходные файлы ---
 OUTPUT_FORMAT = "mp3"    # "mp3", "m4a" (нужен ffmpeg) или "wav"
 BITRATE = "96k"          # для mp3 и m4a
-FFMPEG = "ffmpeg"        # имя или полный путь к ffmpeg
+FFMPEG = ""              # путь к ffmpeg; "" = из пакета imageio-ffmpeg, иначе системный
 FILE_NAME = "{num} {title}"   # шаблон имени файла главы
 SKIP_EXISTING = True     # не озвучивать главу заново, если её файл уже есть
 WRITE_TAGS = True        # название, автор, номер главы в тегах mp3/m4a
@@ -666,11 +680,22 @@ def render_chapter(model, chapter, wav_path):
         return wav.getnframes() / SAMPLE_RATE
 
 
+def find_ffmpeg():
+    """FFMPEG из настроек, иначе ffmpeg из пакета imageio-ffmpeg, иначе системный."""
+    if FFMPEG:
+        return shutil.which(FFMPEG)
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except (ImportError, RuntimeError):
+        return shutil.which("ffmpeg")
+
+
 def encode(wav_path, target, tags):
     """WAV -> mp3/m4a через ffmpeg. Пишет во временный файл и переименовывает."""
     codec = {"mp3": ["-codec:a", "libmp3lame", "-id3v2_version", "3"], "m4a": ["-codec:a", "aac"]}[OUTPUT_FORMAT]
     partial = target.with_name(target.stem + ".part" + target.suffix)
-    command = [FFMPEG, "-y", "-loglevel", "error", "-i", str(wav_path), *codec, "-b:a", BITRATE]
+    command = [find_ffmpeg(), "-y", "-loglevel", "error", "-i", str(wav_path), *codec, "-b:a", BITRATE]
     if WRITE_TAGS:
         for key, value in tags.items():
             if value:
@@ -740,8 +765,9 @@ def main():
     if args.list:
         return
 
-    if OUTPUT_FORMAT != "wav" and not shutil.which(FFMPEG):
-        sys.exit(f"Не найден ffmpeg ('{FFMPEG}'). Укажите путь в FFMPEG или поставьте OUTPUT_FORMAT = \"wav\".")
+    if OUTPUT_FORMAT != "wav" and not find_ffmpeg():
+        sys.exit(f"Не найден ffmpeg. Запускайте скрипт через uv run, укажите путь в FFMPEG "
+                 f"или поставьте OUTPUT_FORMAT = \"wav\".")
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     model = None
