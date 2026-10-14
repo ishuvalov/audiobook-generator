@@ -50,7 +50,7 @@ OUTPUT_FORMAT = "m4b"    # "mp3", "m4a", "m4b" (нужен ffmpeg) или "wav"
 BITRATE = "96k"          # для mp3, m4a и m4b
 FFMPEG = ""              # путь к ffmpeg; "" = из пакета imageio-ffmpeg, иначе системный
 FILE_NAME = "{num} {title}"   # шаблон имени файла главы
-M4B_KEEP_PARTS = False   # m4b: оставить озвученные главы (папка .parts) после сборки
+M4B_KEEP_PARTS = False   # m4b: оставить озвученные главы (папка parts) после сборки
 SKIP_EXISTING = True     # не озвучивать главу заново, если её файл уже есть
 WRITE_TAGS = True        # название, автор, номер главы в тегах mp3/m4a
 
@@ -917,12 +917,12 @@ def main():
     model = None
     audio_total, started = 0.0, time.time()
 
-    # m4b: главы озвучиваются в m4a в папку .parts (так работает продолжение после
+    # m4b: главы озвучиваются в m4a в папку parts (так работает продолжение после
     # прерывания), а в конце склеиваются в один файл.
     m4b = OUTPUT_FORMAT == "m4b"
     is_whole_book = len(selected & set(range(1, len(chapters) + 1))) == len(chapters)
     book_file = out_dir / f"{safe_name(book.title or Path(args.book).stem)}.m4b"
-    chapter_dir = out_dir / ".parts" if m4b else out_dir
+    chapter_dir = out_dir / "parts" if m4b else out_dir
     chapter_format = "m4a" if m4b else OUTPUT_FORMAT
     cover_file = out_dir / "cover.png"
     # Обложка из EPUB не затирает cover.png, который уже лежит в папке; --cover затирает.
