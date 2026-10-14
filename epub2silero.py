@@ -23,6 +23,7 @@ epub2silero.py - озвучка книги EPUB голосами Silero TTS на
     uv run epub2silero.py книга.epub папка_для_аудио
     uv run epub2silero.py книга.epub --list             (только показать главы)
     uv run epub2silero.py книга.epub --m4b              (одна книга m4b с главами для Apple Books)
+    uv run epub2silero.py книга.epub --cover обложка.jpg (своя обложка: jpeg, png, webp...)
 
 Модель Silero скачивается при первом запуске (один файл в папке models рядом со скриптом).
 Прерванную озвучку можно продолжить той же командой: готовые главы пропускаются.
@@ -282,7 +283,7 @@ class Book:
         self.doc_title = {}    # файл -> <title>
         self.anchors = {}      # (файл, id) -> номер блока
         self.toc = []          # [(depth, title, файл, id), ...]
-        self.cover = None      # (байты картинки, ".jpg" или ".png")
+        self.cover = None      # байты картинки обложки
         with zipfile.ZipFile(path) as archive:
             names = {name.lower(): name for name in archive.namelist()}
 
@@ -325,9 +326,8 @@ class Book:
             for node in opf.iterfind(".//{*}metadata/{*}meta"):
                 if node.get("name") == "cover" and node.get("content") in manifest:
                     cover_path = manifest[node.get("content")][0]
-        extension = posixpath.splitext(cover_path or "")[1].lower()
-        if extension in (".jpg", ".jpeg", ".png") and read(cover_path):
-            self.cover = (read(cover_path), ".png" if extension == ".png" else ".jpg")
+        if cover_path:
+            self.cover = read(cover_path)
 
         spine = opf.find(".//{*}spine")
         if spine is None:
@@ -743,7 +743,7 @@ def ffmetadata(text):
     return re.sub(r"([=;#\\\n])", r"\\\1", text)
 
 
-def build_m4b(parts, target, book, work_dir):
+def build_m4b(parts, target, book, cover, work_dir):
     """Склеивает главы m4a в одну книгу m4b с оглавлением и обложкой (без перекодирования)."""
     concat = work_dir / "concat.txt"
     concat.write_text("".join("file '{}'\n".format(str(path.resolve()).replace("'", "'\\''"))
@@ -762,22 +762,72 @@ def build_m4b(parts, target, book, work_dir):
     metadata = work_dir / "metadata.txt"
     metadata.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
-    command = [find_ffmpeg(), "-y", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", str(concat),
-               "-i", str(metadata)]
-    maps = ["-map", "0:a", "-map_metadata", "1", "-map_chapters", "1"]
-    if book.cover:
-        cover = work_dir / ("cover" + book.cover[1])
-        cover.write_bytes(book.cover[0])
-        command += ["-i", str(cover)]
-        maps += ["-map", "2:v", "-c:v", "copy", "-disposition:v", "attached_pic"]
+    inputs = ["-f", "concat", "-safe", "0", "-i", str(concat), "-i", str(metadata)]
+    write_m4b(inputs, ["-map", "0:a", "-map_metadata", "1", "-map_chapters", "1"], cover, target, work_dir)
+    return position / 1000
+
+
+def replace_cover(target, cover, work_dir):
+    """Меняет обложку в готовой книге m4b, звук и главы копируются как есть."""
+    source = target.with_name(target.stem + ".old" + target.suffix)
+    target.replace(source)
+    try:
+        write_m4b(["-i", str(source)], ["-map", "0:a", "-map_metadata", "0", "-map_chapters", "0"],
+                  cover, target, work_dir)
+    except BaseException:
+        source.replace(target)
+        raise
+    source.unlink()
+
+
+def write_m4b(inputs, maps, cover, target, work_dir):
+    """Запускает ffmpeg: входы + обложка -> m4b. Пишет во временный файл и переименовывает."""
+    cover_file = None
+    if cover:
+        cover_file = work_dir / ("cover" + cover[1])
+        cover_file.write_bytes(cover[0])
+        index = inputs.count("-i")
+        inputs = inputs + ["-i", str(cover_file)]
+        maps = maps + ["-map", f"{index}:v", "-c:v", "copy", "-disposition:v", "attached_pic"]
     partial = target.with_name(target.stem + ".part" + target.suffix)
     try:
-        subprocess.run(command + maps + ["-c:a", "copy", "-movflags", "+faststart",
-                                         "-f", "ipod", "-brand", "M4B ", str(partial)], check=True)
+        subprocess.run([find_ffmpeg(), "-y", "-loglevel", "error", *inputs, *maps, "-c:a", "copy",
+                        "-movflags", "+faststart", "-f", "ipod", "-brand", "M4B ", str(partial)], check=True)
         partial.replace(target)
     finally:
         partial.unlink(missing_ok=True)
-    return position / 1000
+        if cover_file:
+            cover_file.unlink(missing_ok=True)
+
+
+def image_type(data):
+    if data[:3] == b"\xff\xd8\xff":
+        return ".jpg"
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return ".png"
+    return None
+
+
+def to_png(data):
+    """Любая картинка, которую понимает ffmpeg (webp, bmp, gif...), -> байты PNG."""
+    ffmpeg = find_ffmpeg()
+    if not ffmpeg:
+        raise RuntimeError("для преобразования картинки нужен ffmpeg")
+    result = subprocess.run([ffmpeg, "-v", "error", "-i", "pipe:0", "-frames:v", "1",
+                             "-c:v", "png", "-f", "image2pipe", "-"], input=data, capture_output=True)
+    if result.returncode or not result.stdout:
+        message = result.stderr.decode("utf-8", "replace").strip().splitlines()
+        raise RuntimeError(message[-1] if message else "ffmpeg не понял формат картинки")
+    return result.stdout
+
+
+def prepare_cover(data, png_only):
+    """Картинка -> (байты, ".jpg" или ".png"). jpeg и png берутся как есть,
+    остальное (и jpeg при png_only) переводится в png."""
+    kind = image_type(data)
+    if kind == ".png" or kind == ".jpg" and not png_only:
+        return data, kind
+    return to_png(data), ".png"
 
 
 # ----------------------------- ЗАПУСК -----------------------------
@@ -814,6 +864,9 @@ def main():
     arguments.add_argument("--list", action="store_true", help="показать главы и выйти")
     arguments.add_argument("--m4b", action="store_true",
                            help="собрать одну книгу m4b с главами для Apple Books (как OUTPUT_FORMAT = \"m4b\")")
+    arguments.add_argument("--cover", metavar="КАРТИНКА",
+                           help="обложка (jpeg, png, webp...): в m4b встраивается в файл, "
+                                "для остальных форматов сохраняется как cover.png рядом с главами")
     args = arguments.parse_args()
 
     global OUTPUT_FORMAT
@@ -847,6 +900,18 @@ def main():
     if OUTPUT_FORMAT != "wav" and not find_ffmpeg():
         sys.exit(f"Не найден ffmpeg. Запускайте скрипт через uv run, укажите путь в FFMPEG "
                  f"или поставьте OUTPUT_FORMAT = \"wav\".")
+    # Обложка: из --cover, иначе из EPUB. В m4b она встраивается, иначе кладётся в cover.png.
+    cover = None
+    if args.cover:
+        try:
+            cover = prepare_cover(Path(args.cover).read_bytes(), png_only=OUTPUT_FORMAT != "m4b")
+        except (OSError, RuntimeError) as error:
+            sys.exit(f"Не удалось прочитать обложку: {error}")
+    elif book.cover:
+        try:
+            cover = prepare_cover(book.cover, png_only=OUTPUT_FORMAT != "m4b")
+        except RuntimeError as error:
+            print(f"Обложку из EPUB не удалось прочитать, пропускаю: {error}")
     out_dir = Path(args.out_dir) if args.out_dir else Path(__file__).resolve().parent / "audiobooks" / Path(args.book).stem
     out_dir.mkdir(parents=True, exist_ok=True)
     model = None
@@ -859,8 +924,20 @@ def main():
     book_file = out_dir / f"{safe_name(book.title or Path(args.book).stem)}.m4b"
     chapter_dir = out_dir / ".parts" if m4b else out_dir
     chapter_format = "m4a" if m4b else OUTPUT_FORMAT
+    cover_file = out_dir / "cover.png"
+    # Обложка из EPUB не затирает cover.png, который уже лежит в папке; --cover затирает.
+    if cover and not m4b and (args.cover or not cover_file.is_file()):
+        cover_file.write_bytes(cover[0])
+        print(f"Обложка: {cover_file}")
     if m4b and is_whole_book and SKIP_EXISTING and book_file.is_file() and not chapter_dir.is_dir():
-        print(f"Книга уже собрана: {book_file}")
+        if args.cover:
+            try:
+                replace_cover(book_file, cover, out_dir)
+            except (OSError, subprocess.CalledProcessError) as error:
+                sys.exit(f"Не удалось заменить обложку: {error}")
+            print(f"Книга уже собрана, обложка заменена: {book_file}")
+        else:
+            print(f"Книга уже собрана: {book_file}")
         return
     chapter_dir.mkdir(parents=True, exist_ok=True)
     parts = []
@@ -897,13 +974,13 @@ def main():
     if m4b:
         print(f"Собираю {book_file.name} ...")
         try:
-            duration = build_m4b(parts, book_file, book, chapter_dir)
+            duration = build_m4b(parts, book_file, book, cover, chapter_dir)
         except (OSError, RuntimeError, subprocess.CalledProcessError) as error:
             sys.exit(f"Не удалось собрать m4b: {error}")
         if is_whole_book and not M4B_KEEP_PARTS:
             shutil.rmtree(chapter_dir, ignore_errors=True)
         else:
-            for name in ("concat.txt", "metadata.txt", "cover.jpg", "cover.png"):
+            for name in ("concat.txt", "metadata.txt"):
                 (chapter_dir / name).unlink(missing_ok=True)
         print(f"Готово: {clock(duration)} звука, глав: {len(parts)}. Файл: {book_file}")
     elif model is None:
