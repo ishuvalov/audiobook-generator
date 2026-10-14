@@ -22,6 +22,7 @@ epub2silero.py - озвучка книги EPUB голосами Silero TTS на
     uv run epub2silero.py книга.epub                    (аудио - в audiobooks/книга рядом со скриптом)
     uv run epub2silero.py книга.epub папка_для_аудио
     uv run epub2silero.py книга.epub --list             (только показать главы)
+    uv run epub2silero.py книга.epub --m4b              (одна книга m4b с главами для Apple Books)
 
 Модель Silero скачивается при первом запуске (один файл в папке models рядом со скриптом).
 Прерванную озвучку можно продолжить той же командой: готовые главы пропускаются.
@@ -43,10 +44,12 @@ TTS_OPTIONS = dict(put_accent=True, put_yo=True,
                    put_stress_homo=True, put_yo_homo=True)
 
 # --- Выходные файлы ---
-OUTPUT_FORMAT = "mp3"    # "mp3", "m4a" (нужен ffmpeg) или "wav"
-BITRATE = "96k"          # для mp3 и m4a
+OUTPUT_FORMAT = "m4b"    # "mp3", "m4a", "m4b" (нужен ffmpeg) или "wav"
+                         # m4b - один файл на всю книгу с главами и обложкой, для Apple Books
+BITRATE = "96k"          # для mp3, m4a и m4b
 FFMPEG = ""              # путь к ffmpeg; "" = из пакета imageio-ffmpeg, иначе системный
 FILE_NAME = "{num} {title}"   # шаблон имени файла главы
+M4B_KEEP_PARTS = False   # m4b: оставить озвученные главы (папка .parts) после сборки
 SKIP_EXISTING = True     # не озвучивать главу заново, если её файл уже есть
 WRITE_TAGS = True        # название, автор, номер главы в тегах mp3/m4a
 
@@ -279,6 +282,7 @@ class Book:
         self.doc_title = {}    # файл -> <title>
         self.anchors = {}      # (файл, id) -> номер блока
         self.toc = []          # [(depth, title, файл, id), ...]
+        self.cover = None      # (байты картинки, ".jpg" или ".png")
         with zipfile.ZipFile(path) as archive:
             names = {name.lower(): name for name in archive.namelist()}
 
@@ -307,12 +311,23 @@ class Book:
             return " ".join((node.text or "").split()) if node is not None else ""
         self.title, self.author = meta("title"), meta("creator")
 
-        manifest, nav_path = {}, None
+        manifest, nav_path, cover_path = {}, None, None
         for item in opf.iterfind(".//{*}manifest/{*}item"):
             item_path = self._resolve(opf_path, item.get("href", ""))[0]
             manifest[item.get("id")] = (item_path, item.get("media-type", ""))
             if "nav" in (item.get("properties") or "").split():
                 nav_path = item_path
+            if "cover-image" in (item.get("properties") or "").split():
+                cover_path = item_path
+
+        # Обложка: EPUB 3 помечает её cover-image, EPUB 2 - тегом <meta name="cover">.
+        if cover_path is None:
+            for node in opf.iterfind(".//{*}metadata/{*}meta"):
+                if node.get("name") == "cover" and node.get("content") in manifest:
+                    cover_path = manifest[node.get("content")][0]
+        extension = posixpath.splitext(cover_path or "")[1].lower()
+        if extension in (".jpg", ".jpeg", ".png") and read(cover_path):
+            self.cover = (read(cover_path), ".png" if extension == ".png" else ".jpg")
 
         spine = opf.find(".//{*}spine")
         if spine is None:
@@ -699,7 +714,7 @@ def find_ffmpeg():
 
 def encode(wav_path, target, tags):
     """WAV -> mp3/m4a через ffmpeg. Пишет во временный файл и переименовывает."""
-    codec = {"mp3": ["-codec:a", "libmp3lame", "-id3v2_version", "3"], "m4a": ["-codec:a", "aac"]}[OUTPUT_FORMAT]
+    codec = {"mp3": ["-codec:a", "libmp3lame", "-id3v2_version", "3"], "m4a": ["-codec:a", "aac"]}[target.suffix[1:]]
     partial = target.with_name(target.stem + ".part" + target.suffix)
     command = [find_ffmpeg(), "-y", "-loglevel", "error", "-i", str(wav_path), *codec, "-b:a", BITRATE]
     if WRITE_TAGS:
@@ -711,6 +726,58 @@ def encode(wav_path, target, tags):
         partial.replace(target)
     finally:
         partial.unlink(missing_ok=True)
+
+
+def audio_duration(path):
+    """Длительность аудиофайла в секундах по выводу ffmpeg."""
+    result = subprocess.run([find_ffmpeg(), "-hide_banner", "-i", str(path)],
+                            capture_output=True, text=True, errors="replace")
+    found = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", result.stderr)
+    if not found:
+        raise RuntimeError(f"не удалось узнать длительность {path.name}")
+    hours, minutes, seconds = found.groups()
+    return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+
+
+def ffmetadata(text):
+    return re.sub(r"([=;#\\\n])", r"\\\1", text)
+
+
+def build_m4b(parts, target, book, work_dir):
+    """Склеивает главы m4a в одну книгу m4b с оглавлением и обложкой (без перекодирования)."""
+    concat = work_dir / "concat.txt"
+    concat.write_text("".join("file '{}'\n".format(str(path.resolve()).replace("'", "'\\''"))
+                              for _, path in parts), encoding="utf-8")
+    lines, position = [";FFMETADATA1"], 0
+    if WRITE_TAGS:
+        for key, value in (("title", book.title), ("album", book.title), ("artist", book.author),
+                           ("album_artist", book.author), ("genre", "Audiobook")):
+            if value:
+                lines.append(f"{key}={ffmetadata(value)}")
+    for title, path in parts:
+        end = position + round(audio_duration(path) * 1000)
+        lines += ["[CHAPTER]", "TIMEBASE=1/1000", f"START={position}", f"END={end}",
+                  f"title={ffmetadata(title)}"]
+        position = end
+    metadata = work_dir / "metadata.txt"
+    metadata.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    command = [find_ffmpeg(), "-y", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", str(concat),
+               "-i", str(metadata)]
+    maps = ["-map", "0:a", "-map_metadata", "1", "-map_chapters", "1"]
+    if book.cover:
+        cover = work_dir / ("cover" + book.cover[1])
+        cover.write_bytes(book.cover[0])
+        command += ["-i", str(cover)]
+        maps += ["-map", "2:v", "-c:v", "copy", "-disposition:v", "attached_pic"]
+    partial = target.with_name(target.stem + ".part" + target.suffix)
+    try:
+        subprocess.run(command + maps + ["-c:a", "copy", "-movflags", "+faststart",
+                                         "-f", "ipod", "-brand", "M4B ", str(partial)], check=True)
+        partial.replace(target)
+    finally:
+        partial.unlink(missing_ok=True)
+    return position / 1000
 
 
 # ----------------------------- ЗАПУСК -----------------------------
@@ -745,9 +812,14 @@ def main():
     arguments.add_argument("out_dir", nargs="?",
                            help="папка для аудиофайлов (по умолчанию audiobooks/<имя файла книги> рядом со скриптом)")
     arguments.add_argument("--list", action="store_true", help="показать главы и выйти")
+    arguments.add_argument("--m4b", action="store_true",
+                           help="собрать одну книгу m4b с главами для Apple Books (как OUTPUT_FORMAT = \"m4b\")")
     args = arguments.parse_args()
 
-    if OUTPUT_FORMAT not in ("mp3", "m4a", "wav"):
+    global OUTPUT_FORMAT
+    if args.m4b:
+        OUTPUT_FORMAT = "m4b"
+    if OUTPUT_FORMAT not in ("mp3", "m4a", "m4b", "wav"):
         sys.exit(f"Неизвестный OUTPUT_FORMAT: {OUTPUT_FORMAT}")
     try:
         book = Book(args.book)
@@ -780,11 +852,25 @@ def main():
     model = None
     audio_total, started = 0.0, time.time()
 
+    # m4b: главы озвучиваются в m4a в папку .parts (так работает продолжение после
+    # прерывания), а в конце склеиваются в один файл.
+    m4b = OUTPUT_FORMAT == "m4b"
+    is_whole_book = len(selected & set(range(1, len(chapters) + 1))) == len(chapters)
+    book_file = out_dir / f"{safe_name(book.title or Path(args.book).stem)}.m4b"
+    chapter_dir = out_dir / ".parts" if m4b else out_dir
+    chapter_format = "m4a" if m4b else OUTPUT_FORMAT
+    if m4b and is_whole_book and SKIP_EXISTING and book_file.is_file() and not chapter_dir.is_dir():
+        print(f"Книга уже собрана: {book_file}")
+        return
+    chapter_dir.mkdir(parents=True, exist_ok=True)
+    parts = []
+
     for number, chapter in enumerate(chapters, 1):
         if number not in selected:
             continue
         name = FILE_NAME.format(num=str(number).zfill(width), title=safe_name(chapter.title))
-        target = out_dir / f"{name}.{OUTPUT_FORMAT}"
+        target = chapter_dir / f"{name}.{chapter_format}"
+        parts.append((chapter.title or f"Глава {number}", target))
         print(f"[{number}/{len(chapters)}] {target.name}")
         if SKIP_EXISTING and target.is_file() and target.stat().st_size > 0:
             print("  уже есть, пропускаю")
@@ -792,11 +878,11 @@ def main():
         if model is None:
             model = load_model()
 
-        wav_path = out_dir / f"{name}.part.wav"
+        wav_path = chapter_dir / f"{name}.part.wav"
         chapter_started = time.time()
         try:
             duration = render_chapter(model, chapter, wav_path)
-            if OUTPUT_FORMAT == "wav":
+            if chapter_format == "wav":
                 wav_path.replace(target)
             else:
                 tags = {"title": chapter.title, "album": book.title, "artist": book.author,
@@ -808,7 +894,19 @@ def main():
         audio_total += duration
         print(f"\r  {clock(duration)} звука за {clock(elapsed)} (x{duration / elapsed:.0f})")
 
-    if model is None:
+    if m4b:
+        print(f"Собираю {book_file.name} ...")
+        try:
+            duration = build_m4b(parts, book_file, book, chapter_dir)
+        except (OSError, RuntimeError, subprocess.CalledProcessError) as error:
+            sys.exit(f"Не удалось собрать m4b: {error}")
+        if is_whole_book and not M4B_KEEP_PARTS:
+            shutil.rmtree(chapter_dir, ignore_errors=True)
+        else:
+            for name in ("concat.txt", "metadata.txt", "cover.jpg", "cover.png"):
+                (chapter_dir / name).unlink(missing_ok=True)
+        print(f"Готово: {clock(duration)} звука, глав: {len(parts)}. Файл: {book_file}")
+    elif model is None:
         print("Все выбранные главы уже озвучены.")
     else:
         print(f"Готово: {clock(audio_total)} звука за {clock(time.time() - started)}. Папка: {out_dir}")
